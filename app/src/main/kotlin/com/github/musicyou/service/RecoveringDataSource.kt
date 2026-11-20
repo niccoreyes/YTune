@@ -41,24 +41,19 @@ class RecoveringDataSource private constructor(
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (length == 0) return 0
+        val original = checkNotNull(originalDataSpec)
+        if (bytesRead == original.length) return C.RESULT_END_OF_INPUT
+
         while (true) {
             try {
                 val result = delegate.read(buffer, offset, length)
                 if (result > 0) bytesRead += result
                 return result
             } catch (error: IOException) {
-                val original = originalDataSpec ?: throw error
                 if (retries >= MAX_RETRIES) throw error
 
-                val position = original.position + bytesRead
-                val remaining = original.length.takeIf { it != C.LENGTH_UNSET.toLong() }
-                    ?.let { (it - bytesRead).coerceAtLeast(0L) }
-                    ?: C.LENGTH_UNSET.toLong()
-                val retrySpec = original.buildUpon()
-                    .setPosition(position)
-                    .setLength(remaining)
-                    .build()
-
+                val retrySpec = original.subrange(bytesRead)
                 closeDelegate()
                 invalidateAndBackoff(original.key, error)
                 openWithRecovery(retrySpec)
@@ -81,7 +76,8 @@ class RecoveringDataSource private constructor(
     private fun openWithRecovery(dataSpec: DataSpec): Long {
         while (true) {
             try {
-                return delegate.open(dataSpec).also { opened = true }
+                opened = true
+                return delegate.open(dataSpec)
             } catch (error: IOException) {
                 if (retries >= MAX_RETRIES) throw error
                 closeDelegate()
@@ -106,8 +102,8 @@ class RecoveringDataSource private constructor(
 
     private fun closeDelegate() {
         if (!opened) return
-        delegate.close()
         opened = false
+        delegate.close()
     }
 
     private companion object {

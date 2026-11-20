@@ -38,6 +38,7 @@ android {
         minSdk = 23
         versionCode = versionToCode(gitVersion.get())
         versionName = gitVersion.get()
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     splits {
@@ -99,6 +100,9 @@ ksp {
 }
 
 dependencies {
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.junit)
+
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.activity)
     implementation(libs.coil.compose)

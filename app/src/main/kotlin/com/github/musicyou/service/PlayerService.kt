@@ -49,6 +49,8 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.ContentMetadata
+import androidx.media3.datasource.cache.ContentMetadataMutations
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
@@ -818,18 +820,18 @@ class PlayerService : InvincibleService(), Player.Listener, PlaybackStatsListene
             .setReadTimeoutMs(30_000)
             .setAllowCrossProtocolRedirects(true)
 
-        val resolvingFactory = ResolvingDataSource.Factory(httpFactory) { dataSpec ->
+        val rangeFactory = DataSource.Factory { YouTubeRangeDataSource(httpFactory.createDataSource()) }
+        val resolvingFactory = ResolvingDataSource.Factory(rangeFactory) { dataSpec ->
             val videoId = dataSpec.key ?: error("A key must be set")
             val resolved = resolvedUrlCache.get(videoId) ?: resolveStream(videoId).also {
                 resolvedUrlCache.put(videoId, it.uri, it.userAgent)
             }
 
             dataSpec.withUri(resolved.uri)
-                .subrange(dataSpec.uriPositionOffset, STREAM_CHUNK_LENGTH)
                 .withUserAgent(resolved.userAgent)
         }
 
-        return CacheDataSource.Factory()
+        val cacheFactory = CacheDataSource.Factory()
             .setCache(cache)
             .setUpstreamDataSourceFactory(
                 RecoveringDataSource.Factory(
@@ -837,6 +839,33 @@ class PlayerService : InvincibleService(), Player.Listener, PlaybackStatsListene
                     invalidateUrl = resolvedUrlCache::invalidate
                 )
             )
+
+        return ResolvingDataSource.Factory(cacheFactory) { dataSpec ->
+            dataSpec.key?.let(::repairTruncatedCacheEntry)
+            dataSpec
+        }
+    }
+
+    private fun repairTruncatedCacheEntry(videoId: String) {
+        val cachedLength = ContentMetadata.getContentLength(cache.getContentMetadata(videoId))
+        val legacyRangeStart = cachedLength - YouTubeRangeDataSource.RANGE_LENGTH
+        if (legacyRangeStart < 0) return
+        if (legacyRangeStart != 0L &&
+            cache.getCachedSpans(videoId).none { it.position == legacyRangeStart }
+        ) return
+
+        val formatLength = database.formatContentLength(videoId) ?: return
+        if (cachedLength >= formatLength) return
+
+        synchronized(cache) {
+            if (ContentMetadata.getContentLength(cache.getContentMetadata(videoId)) == cachedLength) {
+                cache.applyContentMetadataMutations(
+                    videoId,
+                    ContentMetadataMutations().remove(ContentMetadata.KEY_CONTENT_LENGTH)
+                )
+                cache.removeResource(videoId)
+            }
+        }
     }
 
     private fun resolveStream(videoId: String): ResolvedStream {
@@ -1116,7 +1145,6 @@ class PlayerService : InvincibleService(), Player.Listener, PlaybackStatsListene
 
         const val FAVORITE_ACTION = "FAVORITE"
 
-        const val STREAM_CHUNK_LENGTH = 512 * 1024L
     }
 }
 
